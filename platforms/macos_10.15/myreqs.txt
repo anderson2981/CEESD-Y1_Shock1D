@@ -1,0 +1,13 @@
+# requirements.txt created by version.sh
+# Date: Tue Jan 26 12:56:02 CST 2021
+# Host: wirelessprv-10-193-50-119.near.illinois.edu [Darwin wirelessprv-10-193-50-119.near.illinois.edu 19.6.0 Darwin Kernel Version 19.6.0: Thu Oct 29 22:56:45 PDT 2020; root:xnu-6153.141.2.2~1/RELEASE_X86_64 x86_64]
+# Python: /Users/mike/software/Install/Conda/envs/mirgeDriver.shock1d/bin/python [Python 3.8.6]
+--editable git+https://github.com/inducer/pymbolic.git@v2020.1-64-gca9dcc5#egg=pymbolic
+--editable git+https://github.com/inducer/loopy.git@v2020.2.1-141-gf37e2567#egg=loopy
+--editable git+https://github.com/inducer/dagrt.git@d463aff#egg=dagrt
+--editable git+https://github.com/inducer/leap.git@d30ba46#egg=leap
+--editable git+https://github.com/inducer/modepy.git@a4eb6ee#egg=modepy
+--editable git+https://github.com/inducer/meshmode.git@3af83a4#egg=meshmode
+--editable git+https://github.com/inducer/grudge.git@0bb54f6#egg=grudge
+--editable git+https://github.com/inducer/pytato.git@72a499f#egg=pytato
+--editable git+https://github.com/illinois-ceesd/mirgecom@7248b9b#egg=mirgecom
