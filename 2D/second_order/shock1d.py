@@ -151,17 +151,13 @@ def main(ctx_factory=cl.create_some_context,
     #nrestart = 500
     nviz =10 
     nrestart = 10000000
-    current_dt = 2.5e-7
+    current_dt = 1.e-7
     #t_final = 5.e-7
     t_final = 3e-4
 
-    # shock capturing parameters
-    alpha_sc = 0.1
-    sigma_sc = -3.0
-    kappa_sc = 0.5
 
     dim = 2
-    order = 1
+    order = 2
     exittol = 10000000 # do never exit when comparing to exact solution
     #t_final = 0.001
     current_cfl = 1.0
@@ -227,6 +223,21 @@ def main(ctx_factory=cl.create_some_context,
     inflow = PrescribedBoundary(inflow_init)
     wall = AdiabaticSlipBoundary()
     dummy = DummyBoundary()
+
+    # shock capturing parameters
+    # sonic conditions
+    density_ratio = (gamma_CO2+1.)*1.0/((gamma_CO2-1.)+2.);
+
+    density_star = rho1*density_ratio
+    shock_thickness = 20*0.001 # on the order of 3 elements, should match what is in mesh generator
+    # alpha is ~h/p (spacing/order)
+    #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
+    alpha_sc = 0.05  
+    # sigma is ~p^-4 
+    sigma_sc = -3.0
+    # kappa is empirical ...
+    kappa_sc = 0.5
+    print(f"Shock capturing parameters: alpha {alpha_sc}, s0 {sigma_sc}, kappa {kappa_sc}")
 
     from grudge import sym
 #    boundaries = {BTAG_ALL: DummyBoundary}
@@ -322,7 +333,8 @@ def main(ctx_factory=cl.create_some_context,
     def my_rhs(t, state):
         #return inviscid_operator(discr, eos=eos, boundaries=boundaries, q=state, t=t)
         return ( inviscid_operator(discr, q=state, t=t, boundaries=boundaries, eos=eos)
-               + artificial_viscosity(discr,t=t, r=state, eos=eos, boundaries=boundaries, alpha=alpha_sc))
+               + artificial_viscosity(discr,t=t, r=state, eos=eos, boundaries=boundaries, 
+               alpha=alpha_sc, sigma=sigma_sc, kappa=kappa_sc))
 
     def my_checkpoint(step, t, dt, state):
 
@@ -351,7 +363,7 @@ def main(ctx_factory=cl.create_some_context,
                               step=step, t=t, dt=dt, nstatus=nstatus,
                               nviz=nviz, exittol=exittol,
                               constant_cfl=constant_cfl, comm=comm, vis_timer=vis_timer,
-                              overwrite=True, exact_soln=exact_soln)
+                              overwrite=True, exact_soln=exact_soln,sigma=sigma_sc,kappa=kappa_sc)
 
     if rank == 0:
         logging.info("Stepping.")
