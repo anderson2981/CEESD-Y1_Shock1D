@@ -154,7 +154,6 @@ def main(ctx_factory=cl.create_some_context,
     #t_final = 5.e-7
     t_final = 3e-4
 
-
     dim = 2
     order = 1
     exittol = 10000000 # do never exit when comparing to exact solution
@@ -162,6 +161,7 @@ def main(ctx_factory=cl.create_some_context,
     current_cfl = 1.0
     vel_init = np.zeros(shape=(dim,))
     vel_inflow = np.zeros(shape=(dim,))
+    vel_outflow = np.zeros(shape=(dim,))
     orig = np.zeros(shape=(dim,))
     #vel[0] = 340.0
     #vel_inflow[0] = 100.0  # m/s
@@ -200,12 +200,14 @@ def main(ctx_factory=cl.create_some_context,
     density_ratio = (gamma_CO2+1.)*mach*mach/((gamma_CO2-1.)*mach*mach+2.);
     mach2 = math.sqrt(((gamma_CO2-1.)*mach*mach+2.)/(2.*gamma_CO2*mach*mach-(gamma_CO2-1.)))
 
+
     rho1 = rho_bkrnd
     pressure1 = pres_bkrnd
     rho2 = rho1*density_ratio
     pressure2 = pressure1*pressure_ratio
     velocity1 = 0.
     velocity2 = -mach*c_bkrnd*(1/density_ratio-1)
+    c_shkd = math.sqrt(gamma_CO2*pressure2/rho2)
 
     vel_inflow[0] = velocity2
 
@@ -215,13 +217,29 @@ def main(ctx_factory=cl.create_some_context,
                               rhol=rho2, rhor=rho1,
                               pl=pressure2, pr=pressure1,
                               ul=vel_inflow[0], ur=0.)
-    inflow_init = Lump(numdim=dim, rho0=rho2, p0=pressure2,
+    inflow_init = Lump(dim=dim, rho0=rho2, p0=pressure2,
                        center=orig, velocity=vel_inflow, rhoamp=0.0)
+    outflow_init = Lump(dim=dim, rho0=rho1, p0=pressure1,
+                       center=orig, velocity=vel_outflow, rhoamp=0.0)
 
 
     inflow = PrescribedBoundary(inflow_init)
+    outflow = PrescribedBoundary(outflow_init)
     wall = AdiabaticSlipBoundary()
     dummy = DummyBoundary()
+
+    # timestep estimate
+    wave_speed = max(mach2*c_bkrnd,c_shkd+velocity2)
+    char_len = 0.001
+    area=char_len*char_len/2
+    perimeter = 2*char_len+math.sqrt(2*char_len*char_len)
+    h = 2*area/perimeter
+
+    dt_est = 1/(wave_speed*order*order/h)
+    print(f"Time step estimate {dt_est}\n")
+
+    dt_est_visc = 1/(wave_speed*order*order/h+alpha_sc*order*order*order*order/h/h)
+    print(f"Viscous timestep estimate {dt_est_visc}\n")
 
     # shock capturing parameters
     # sonic conditions
@@ -231,9 +249,9 @@ def main(ctx_factory=cl.create_some_context,
     shock_thickness = 20*0.001 # on the order of 3 elements, should match what is in mesh generator
     # alpha is ~h/p (spacing/order)
     #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
-    alpha_sc = 0.1
+    alpha_sc = 0.2
     # sigma is ~p^-4 
-    sigma_sc = -3.0
+    sigma_sc = -11.0
     # kappa is empirical ...
     kappa_sc = 0.5
     print(f"Shock capturing parameters: alpha {alpha_sc}, s0 {sigma_sc}, kappa {kappa_sc}")
@@ -241,7 +259,7 @@ def main(ctx_factory=cl.create_some_context,
     from grudge import sym
 #    boundaries = {BTAG_ALL: DummyBoundary}
     boundaries = {sym.DTAG_BOUNDARY("Inflow"): inflow,
-                  sym.DTAG_BOUNDARY("Outflow"): dummy,
+                  sym.DTAG_BOUNDARY("Outflow"): outflow,
                   sym.DTAG_BOUNDARY("Wall"): wall}
 
 
