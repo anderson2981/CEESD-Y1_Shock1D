@@ -1,0 +1,43 @@
+Run1:
+  M=2
+  alpha_sc = 0.1
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=2.5e-7
+Run2:
+  M=2
+  alpha_sc = 0.2
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=1.0e-7
+Run3:
+  M=2
+  alpha_sc = 0.05
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=2.5e-7
+Run4:
+  M=2
+  alpha_sc = 0.025
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=2.5e-7
+Run5:
+  M=2
+  alpha_sc = 0.1
+  sigma_sc = -7.0
+  kappa_sc = 0.5
+  dt=2.5e-7
+Run6:
+  M=2
+  alpha_sc = 0.1
+  sigma_sc = -4.0
+  kappa_sc = 0.5
+  dt=2.5e-7
+Run7:
+  M=2
+  alpha_sc = 0.4
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=1.0e-7
+
