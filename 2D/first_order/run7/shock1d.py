@@ -237,7 +237,7 @@ def main(ctx_factory=cl.create_some_context,
     shock_thickness = 20*0.001 # on the order of 3 elements, should match what is in mesh generator
     # alpha is ~h/p (spacing/order)
     #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
-    alpha_sc = 0.2
+    alpha_sc = 0.4
     # sigma is ~p^-4 
     sigma_sc = -11.0
     # kappa is empirical ...

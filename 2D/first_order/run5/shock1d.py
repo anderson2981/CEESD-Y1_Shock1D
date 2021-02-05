@@ -150,7 +150,7 @@ def main(ctx_factory=cl.create_some_context,
     #nrestart = 500
     nviz =50 
     nrestart = 10000000
-    current_dt = 1.0e-7
+    current_dt = 2.5e-7
     #t_final = 5.e-7
     t_final = 3e-4
 
@@ -237,9 +237,9 @@ def main(ctx_factory=cl.create_some_context,
     shock_thickness = 20*0.001 # on the order of 3 elements, should match what is in mesh generator
     # alpha is ~h/p (spacing/order)
     #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
-    alpha_sc = 0.2
+    alpha_sc = 0.1
     # sigma is ~p^-4 
-    sigma_sc = -11.0
+    sigma_sc = -7.0
     # kappa is empirical ...
     kappa_sc = 0.5
     print(f"Shock capturing parameters: alpha {alpha_sc}, s0 {sigma_sc}, kappa {kappa_sc}")
