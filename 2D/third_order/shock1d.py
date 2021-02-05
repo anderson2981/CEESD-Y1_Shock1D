@@ -149,9 +149,9 @@ def main(ctx_factory=cl.create_some_context,
 
     #nviz = 500
     #nrestart = 500
-    nviz =10 
+    nviz =25 
     nrestart = 10000000
-    current_dt = 1.e-7
+    current_dt = 5.e-8
     #t_final = 5.e-7
     t_final = 3e-4
 
@@ -234,7 +234,7 @@ def main(ctx_factory=cl.create_some_context,
     #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
     alpha_sc = 0.05  
     # sigma is ~p^-4 
-    sigma_sc = -3.0
+    sigma_sc = -7.0
     # kappa is empirical ...
     kappa_sc = 0.5
     print(f"Shock capturing parameters: alpha {alpha_sc}, s0 {sigma_sc}, kappa {kappa_sc}")
