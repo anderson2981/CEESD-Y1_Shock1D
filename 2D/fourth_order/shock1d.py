@@ -64,7 +64,6 @@ from mirgecom.steppers import advance_state
 from mirgecom.boundary import (
     PrescribedBoundary,
     AdiabaticSlipBoundary,
-    AdiabaticSlipBoundaryWyatt,
     DummyBoundary
 )
 from mirgecom.initializers import (
@@ -149,9 +148,9 @@ def main(ctx_factory=cl.create_some_context,
 
     #nviz = 500
     #nrestart = 500
-    nviz =10 
+    nviz =625 
     nrestart = 10000000
-    current_dt = 1.e-7
+    current_dt = 2.e-8
     #t_final = 5.e-7
     t_final = 3e-4
 
@@ -207,6 +206,7 @@ def main(ctx_factory=cl.create_some_context,
     pressure2 = pressure1*pressure_ratio
     velocity1 = 0.
     velocity2 = -mach*c_bkrnd*(1/density_ratio-1)
+    c_shkd = math.sqrt(gamma_CO2*pressure2/rho2)
 
     vel_inflow[0] = velocity2
 
@@ -232,12 +232,26 @@ def main(ctx_factory=cl.create_some_context,
     shock_thickness = 20*0.001 # on the order of 3 elements, should match what is in mesh generator
     # alpha is ~h/p (spacing/order)
     #alpha_sc = shock_thickness*abs(velocity1-velocity2)*density_star
-    alpha_sc = 0.05  
+    #alpha_sc = 0.05  
+    alpha_sc = 0.1
     # sigma is ~p^-4 
-    sigma_sc = -3.0
+    sigma_sc = -9.0
     # kappa is empirical ...
     kappa_sc = 0.5
     print(f"Shock capturing parameters: alpha {alpha_sc}, s0 {sigma_sc}, kappa {kappa_sc}")
+
+    # timestep estimate
+    wave_speed = max(mach2*c_bkrnd,c_shkd+velocity2)
+    char_len = 0.001
+    area=char_len*char_len/2
+    perimeter = 2*char_len+math.sqrt(2*char_len*char_len)
+    h = 2*area/perimeter
+
+    dt_est = 1/(wave_speed*order*order/h)
+    print(f"Time step estimate {dt_est}\n")
+
+    dt_est_visc = 1/(wave_speed*order*order/h+alpha_sc*order*order*order*order/h/h)
+    print(f"Viscous timestep estimate {dt_est_visc}\n")
 
     from grudge import sym
 #    boundaries = {BTAG_ALL: DummyBoundary}
