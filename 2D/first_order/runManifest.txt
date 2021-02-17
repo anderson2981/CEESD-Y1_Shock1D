@@ -50,7 +50,7 @@ Run7:
 Run8:
   explicit euler
   M=2
-  alpha_sc = 0.1
+  alpha_sc = 0.2
   sigma_sc = -11.0
   kappa_sc = 0.5
-  dt=2.0e-7
+  dt=1.0e-7
