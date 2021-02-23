@@ -54,3 +54,17 @@ Run8:
   sigma_sc = -11.0
   kappa_sc = 0.5
   dt=1.0e-7
+Run9:
+  low-storage rk4 (LSERK)
+  M=2
+  alpha_sc = 0.2
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=2.0e-7
+Run10:
+  low-storage rk4 (LSERK)
+  M=2
+  alpha_sc = 0.1
+  sigma_sc = -11.0
+  kappa_sc = 0.5
+  dt=2.5e-7
