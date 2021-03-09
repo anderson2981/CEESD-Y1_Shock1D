@@ -6,7 +6,7 @@ Driver and versioning for a 1D shock propagation problem using MIRGE-Com
 ./buildMirge.sh
 
 #build a version for a specific platform with 
-platforms/<platform>/buildMirge.sh
+platforms/\<platform\>/buildMirge.sh
 
 #load that environment
 conda activate mirgeDriver.shock1d
