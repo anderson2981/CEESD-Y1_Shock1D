@@ -15,4 +15,4 @@ conda activate mirgeDriver.shock1d
 run drivers with ./run.sh in their respective subdirectory
 
 Run documentation and analysis located at:
-https://docs.google.com/document/d/1wL_1nLRqoCRpz9jtx-HYr5DrKDmZneOf-G4bKLg5IPk/edit?usp=sharing
+https://docs.google.com/document/d/1EN-cj7LFd_ekl3a8kbE6GLrru3aRD0wROqTbtchIocI/edit?usp=sharing
