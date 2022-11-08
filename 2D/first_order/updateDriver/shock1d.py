@@ -218,8 +218,8 @@ def main(ctx_factory=cl.create_some_context,
 
     vel_inflow = velocity2
 
-    #timestepper = rk4_step
-    timestepper = euler_step
+    timestepper = rk4_step
+    #timestepper = euler_step
     eos = IdealSingleGas(gamma=gamma_CO2, gas_const=R_CO2)
     bulk_init = Discontinuity(dim=dim, x0=.05,sigma=0.01,
                               rhol=rho2, rhor=rho1,

@@ -79,7 +79,7 @@ from mirgecom.logging_quantities import (initialize_logmgr,
 logger = logging.getLogger(__name__)
 
 
-def get_mesh():
+def get_mesh(use_gmsh=False):
     """Import a grid using `gmsh`.
 
     Input required:

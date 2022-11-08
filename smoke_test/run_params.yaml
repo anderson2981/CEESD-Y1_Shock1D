@@ -1,0 +1,23 @@
+nviz: 5
+viz_level: 2
+nrestart: 10
+nhealth: 1
+nstatus: 1
+current_dt: 2.0e-10
+t_final: 4.e-9
+nspecies:  0
+order:  2
+use_av: 1
+alpha_sc: 0.01
+s0_sc: -5.0
+kappa_sc: 0.5
+integrator: euler
+health_pres_min: 1
+health_pres_max: 1000000
+#
+#  wall settings
+#
+use_wall_ox: False
+use_wall_mass: False
+
+use_sponge: False
