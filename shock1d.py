@@ -80,8 +80,9 @@ from mirgecom.steppers import advance_state
 from mirgecom.boundary import (
     PrescribedFluidBoundary,
     IsothermalWallBoundary,
-    SymmetryBoundary,
+    #SymmetryBoundary,
     AdiabaticSlipBoundary,
+    AdiabaticSlipWallBoundary,
     DummyBoundary
 )
 from mirgecom.diffusion import (
@@ -131,6 +132,211 @@ class _FluidOxDiffCommTag:
 class _WallOxDiffCommTag:
     pass
 
+from mirgecom.viscous import viscous_facial_flux_central
+from grudge.trace_pair import TracePair
+
+class SymmetryBoundary(PrescribedFluidBoundary):
+    r"""Boundary condition implementing symmetry/slip wall boundary.
+    a.k.a. Reflective inviscid wall boundary
+    This class implements an adiabatic reflective slip boundary given
+    by
+    $\mathbf{q^{+}} = [\rho^{-}, (\rho{E})^{-}, (\rho\vec{V})^{-}
+    - 2((\rho\vec{V})^{-}\cdot\hat{\mathbf{n}}) \hat{\mathbf{n}}]$
+    wherein the normal component of velocity at the wall is 0, and
+    tangential components are preserved. These perfectly reflecting
+    conditions are used by the forward-facing step case in
+    [Hesthaven_2008]_, Section 6.6, and correspond to the characteristic
+    boundary conditions described in detail in [Poinsot_1992]_.
+    For the gradients, the no-shear condition implies that cross-terms are absent
+    and that temperature gradients are null due to the adiabatic condition.
+    .. math::
+        \nabla u ^+ = \nabla{u}^- \circ I
+        \nabla T \cdot n = 0
+    .. automethod:: inviscid_wall_flux
+    .. automethod:: viscous_wall_flux
+    .. automethod:: grad_cv_bc
+    .. automethod:: temperature_bc
+    .. automethod:: adiabatic_wall_state_for_advection
+    .. automethod:: adiabatic_wall_state_for_diffusion
+    .. automethod:: grad_temperature_bc
+    .. automethod:: adiabatic_slip_grad_av
+    """
+
+    def __init__(self):
+        """Initialize the boundary condition object."""
+        PrescribedFluidBoundary.__init__(
+            self, boundary_state_func=self.adiabatic_wall_state_for_advection,
+            inviscid_flux_func=self.inviscid_wall_flux,
+            viscous_flux_func=self.viscous_wall_flux,
+            boundary_temperature_func=self.temperature_bc,
+            boundary_gradient_cv_func=self.grad_cv_bc
+        )
+
+    def adiabatic_wall_state_for_advection(self, dcoll, dd_bdry, gas_model,
+                                           state_minus, **kwargs):
+        """Return state with opposite normal momentum."""
+        actx = state_minus.array_context
+        nhat = actx.thaw(dcoll.normal(dd_bdry))
+
+        # flip the normal component of the velocity
+        mom_plus = (state_minus.momentum_density
+             - 2*(np.dot(state_minus.momentum_density, nhat)*nhat))
+
+        # no changes are necessary to the energy equation because the velocity
+        # magnitude is the same, only the (normal) direction changes.
+
+        cv_plus = make_conserved(
+            state_minus.dim, mass=state_minus.mass_density,
+            energy=state_minus.energy_density, momentum=mom_plus,
+            species_mass=state_minus.species_mass_density
+        )
+        return make_fluid_state(cv=cv_plus, gas_model=gas_model,
+                                temperature_seed=state_minus.temperature)
+
+    def adiabatic_wall_state_for_diffusion(self, dcoll, dd_bdry, gas_model,
+                                           state_minus, **kwargs):
+        """Return state with zero normal-velocity and energy(Twall)."""
+        actx = state_minus.array_context
+        nhat = actx.thaw(dcoll.normal(dd_bdry))
+
+        # remove normal component from velocity/momentum
+        mom_plus = (state_minus.momentum_density
+                      - 1*(np.dot(state_minus.momentum_density, nhat)*nhat))
+
+        # modify energy accordingly
+        kinetic_energy_plus = 0.5*np.dot(mom_plus, mom_plus)/state_minus.mass_density
+        internal_energy_plus = (
+            state_minus.mass_density * gas_model.eos.get_internal_energy(
+                temperature=state_minus.temperature,
+                species_mass_fractions=state_minus.species_mass_fractions))
+
+        cv_plus = make_conserved(
+            state_minus.dim, mass=state_minus.mass_density,
+            energy=kinetic_energy_plus + internal_energy_plus,
+            momentum=mom_plus,
+            species_mass=state_minus.species_mass_density
+        )
+        return make_fluid_state(cv=cv_plus, gas_model=gas_model,
+                                temperature_seed=state_minus.temperature)
+
+    def inviscid_wall_flux(self, dcoll, dd_bdry, gas_model, state_minus,
+            numerical_flux_func=inviscid_facial_flux_rusanov, **kwargs):
+        """Return Riemann flux using state with mom opposite of interior state."""
+        wall_state = self.adiabatic_wall_state_for_advection(
+            dcoll, dd_bdry, gas_model, state_minus)
+        state_pair = TracePair(dd_bdry, interior=state_minus, exterior=wall_state)
+
+        actx = state_minus.array_context
+        normal = actx.thaw(dcoll.normal(dd_bdry))
+        return numerical_flux_func(state_pair, gas_model, normal)
+
+    def temperature_bc(self, state_minus, **kwargs):
+        """Get temperature value used in grad(T)."""
+        return state_minus.temperature
+
+    def grad_cv_bc(self, state_minus, grad_cv_minus, normal, **kwargs):
+        """Return grad(CV) to be used in the boundary calculation of viscous flux."""
+        grad_species_mass_plus = 1.*grad_cv_minus.species_mass
+        dim = state_minus.dim
+        if state_minus.nspecies > 0:
+            from mirgecom.fluid import species_mass_fraction_gradient
+            grad_y_minus = species_mass_fraction_gradient(state_minus.cv,
+                                                          grad_cv_minus)
+            grad_y_plus = grad_y_minus - np.outer(grad_y_minus@normal, normal)
+            grad_species_mass_plus = 0.*grad_y_plus
+
+            for i in range(state_minus.nspecies):
+                grad_species_mass_plus[i] = \
+                    (state_minus.mass_density*grad_y_plus[i]
+                     + state_minus.species_mass_fractions[i]*grad_cv_minus.mass)
+
+        # extrapolate density and its gradient
+        mass_plus = state_minus.mass_density
+        grad_mass_plus = grad_cv_minus.mass \
+            - 1*np.dot(grad_cv_minus.mass, normal)*normal
+
+        from mirgecom.fluid import velocity_gradient
+        v_minus = state_minus.velocity
+        grad_v_minus = velocity_gradient(state_minus.cv, grad_cv_minus)
+
+        # modify velocity gradient at the boundary:
+        # remove normal component of velocity
+        v_plus = state_minus.velocity \
+                      - 1*np.dot(state_minus.velocity, normal)*normal
+        # retain only the diagonal terms to force zero shear stress
+        grad_v_plus = grad_v_minus*np.eye(dim)
+
+        # product rule for momentum
+        grad_momentum_density_plus = mass_plus*grad_v_plus + v_plus*grad_mass_plus
+
+        # the energy has to be modified accordingly:
+        # first, get gradient of internal energy, i.e., no kinetic energy
+        grad_int_energy_minus = grad_cv_minus.energy \
+            - (0.5*(np.dot(v_minus, v_minus)*grad_cv_minus.mass
+               + 2.0*state_minus.mass_density * np.dot(v_minus, grad_v_minus)))
+        # remove normal component
+        grad_int_energy_plus = grad_int_energy_minus \
+            - 1*np.dot(grad_int_energy_minus, normal)*normal
+        # then modify gradient of kinetic energy to match the changes in velocity
+        grad_kin_energy_plus = \
+            0.5*(np.dot(v_plus, v_plus)*grad_mass_plus
+                + 2.0*mass_plus * np.dot(v_plus, grad_v_plus))
+        # lastly, evaluate gradient of energy
+        grad_energy_plus = grad_int_energy_plus + grad_kin_energy_plus
+
+        return make_conserved(grad_cv_minus.dim,
+                              mass=grad_mass_plus,
+                              energy=grad_energy_plus,
+                              momentum=grad_momentum_density_plus,
+                              species_mass=grad_species_mass_plus)
+
+    def grad_temperature_bc(self, grad_t_minus, normal, **kwargs):
+        """Return grad(temperature) to be used in viscous flux at wall."""
+        return grad_t_minus - np.dot(grad_t_minus, normal)*normal
+
+    def viscous_wall_flux(self, dcoll, dd_bdry, gas_model, state_minus,
+                          grad_cv_minus, grad_t_minus,
+                          numerical_flux_func=viscous_facial_flux_central,
+                                           **kwargs):
+        """Return the boundary flux for the divergence of the viscous flux."""
+        from mirgecom.viscous import viscous_flux
+        actx = state_minus.array_context
+        normal = actx.thaw(dcoll.normal(dd_bdry))
+
+        state_plus = self.adiabatic_wall_state_for_diffusion(
+            dcoll=dcoll, dd_bdry=dd_bdry, gas_model=gas_model, state_minus=state_minus)
+
+        grad_cv_plus = self.grad_cv_bc(state_minus=state_minus,
+                                       grad_cv_minus=grad_cv_minus,
+                                       normal=normal, **kwargs)
+        grad_t_plus = self.grad_temperature_bc(grad_t_minus, normal)
+
+        # Note that [Mengaldo_2014]_ uses F_v(Q_bc, dQ_bc) here and
+        # *not* the numerical viscous flux as advised by [Bassi_1997]_.
+        f_ext = viscous_flux(state=state_plus, grad_cv=grad_cv_plus,
+                             grad_t=grad_t_plus)
+
+        return f_ext@normal
+
+    def adiabatic_slip_grad_av(self, dcoll, dd_bdry, grad_av_minus, **kwargs):
+        """Get the exterior grad(Q) on the boundary for artificial viscosity."""
+        # Grab some boundary-relevant data
+        dim, = grad_av_minus.mass.shape
+        actx = get_container_context_recursively(grad_av_minus)
+        nhat = actx.thaw(dcoll.normal(dd_bdry))
+
+        # Subtract 2*wall-normal component of q
+        # to enforce q=0 on the wall
+        s_mom_normcomp = np.outer(nhat,
+                                  np.dot(grad_av_minus.momentum, nhat))
+        s_mom_flux = grad_av_minus.momentum - 2*s_mom_normcomp
+
+        # flip components to set a Neumann condition
+        return make_conserved(dim, mass=-grad_av_minus.mass,
+                              energy=-grad_av_minus.energy,
+                              momentum=-s_mom_flux,
+                              species_mass=-grad_av_minus.species_mass)
+
 
 def get_mesh(size, bl_ratio, interface_ratio, transfinite=False, use_gmsh=False):
     """Generate a grid using `gmsh`.
@@ -139,8 +345,8 @@ def get_mesh(size, bl_ratio, interface_ratio, transfinite=False, use_gmsh=False)
 
     left_boundary_loc = 0.0
     right_boundary_loc = 0.1
-    bottom_boundary_loc = 0.0
-    top_boundary_loc = 0.02
+    bottom_boundary_loc = -0.01
+    top_boundary_loc = 0.01
     wall_boundary_loc = 0.12
     if use_gmsh:
         from meshmode.mesh.io import (
@@ -172,17 +378,22 @@ def get_mesh(size, bl_ratio, interface_ratio, transfinite=False, use_gmsh=False)
                 Physical Surface('solid') = {{2}};
                 Physical Curve('fluid_inflow') = {{4}};
                 Physical Curve('fluid_wall') = {{1,3}};
+                Physical Curve('fluid_wall_top') = {{3}};
+                Physical Curve('fluid_wall_bottom') = {{1}};
                 Physical Curve('interface') = {{2}};
                 Physical Curve('solid_wall') = {{5, 6, 7}};
+                Physical Curve('solid_wall_top') = {{5}};
+                Physical Curve('solid_wall_bottom') = {{6}};
+                Physical Curve('solid_wall_end') = {{7}};
         """)
 
         if transfinite:
             my_string += (f"""
 
-                    Transfinite Curve {{1, 3}} = 100;
-                    Transfinite Curve {{5, 6}} = 20;
-                    Transfinite Curve {{2, 4, 7}} = 20;
-                    Transfinite Surface {{1, 2}};
+                    Transfinite Curve {{1, 3}} = {0.1} / {size};
+                    Transfinite Curve {{5, 6}} = {0.02} / {size};
+                    Transfinite Curve {{2, 4, 7}} = {0.02} / {size};
+                    Transfinite Surface {{1, 2}} Alternate;
 
                     Mesh.MeshSizeExtendFromBoundary = 0;
                     Mesh.MeshSizeFromPoints = 0;
@@ -712,6 +923,7 @@ def main(ctx_factory=cl.create_some_context,
     kappa_sc = 0.5
     dim = 2
     inv_num_flux = "rusanov"
+    periodic = False
 
     # material properties
     mu = 1.0e-5
@@ -751,7 +963,7 @@ def main(ctx_factory=cl.create_some_context,
     sponge_sigma = 1.0
 
     # mesh parameters
-    size=0.001
+    mesh_size=0.001
     bl_ratio = 3
     interface_ratio = 2
     transfinite = False
@@ -795,6 +1007,10 @@ def main(ctx_factory=cl.create_some_context,
             pass
         try:
             nlimit = int(input_data["nlimit"])
+        except KeyError:
+            pass
+        try:
+            periodic = bool(input_data["periodic"])
         except KeyError:
             pass
         try:
@@ -1083,6 +1299,7 @@ def main(ctx_factory=cl.create_some_context,
     r = univ_gas_const/mw
     cp = r*gamma/(gamma - 1)
     Pr = 0.75
+    Pr = 1000000000
 
     if mu_override:
         mu = mu_input
@@ -1210,6 +1427,7 @@ def main(ctx_factory=cl.create_some_context,
     c_bkrnd = math.sqrt(gamma*pres_bkrnd/rho_bkrnd)
 
     mach = 2.0
+    #mach = 1.01
     pressure_ratio = (2.*gamma*mach*mach-(gamma-1.))/(gamma+1.)
     density_ratio = (gamma+1.)*mach*mach/((gamma-1.)*mach*mach+2.)
     #mach2 = math.sqrt(((gamma-1.)*mach*mach+2.)/(2.*gamma*mach*mach-(gamma-1.)))
@@ -1296,13 +1514,39 @@ def main(ctx_factory=cl.create_some_context,
             #mesh, tag_to_elements = read_gmsh(
                 #mesh_filename, force_ambient_dim=dim,
                 #return_tag_to_elements_map=True)
-            mesh, tag_to_elements = get_mesh(use_gmsh=True, size=size,
+            mesh, tag_to_elements = get_mesh(use_gmsh=True, size=mesh_size,
                                              bl_ratio=bl_ratio,
                                              interface_ratio=interface_ratio,
                                              transfinite=transfinite)()
             volume_to_tags = {
                 "fluid": ["fluid"],
                 "wall": ["solid"]}
+
+            # apply periodicity
+            if periodic:
+
+                from meshmode.mesh.processing import (
+                    glue_mesh_boundaries, BoundaryPairMapping)
+
+                from meshmode import AffineMap
+                bdry_pair_mappings_and_tols = []
+                offset = [0., 0.02]
+                bdry_pair_mappings_and_tols.append((
+                    BoundaryPairMapping(
+                        "fluid_wall_bottom",
+                        "fluid_wall_top",
+                        AffineMap(offset=offset)),
+                    1e-12))
+
+                bdry_pair_mappings_and_tols.append((
+                    BoundaryPairMapping(
+                        "solid_wall_bottom",
+                        "solid_wall_top",
+                        AffineMap(offset=offset)),
+                    1e-12))
+
+                mesh = glue_mesh_boundaries(mesh, bdry_pair_mappings_and_tols)
+
             return mesh, tag_to_elements, volume_to_tags
 
         volume_to_local_mesh_data, global_nelements = distribute_mesh(
@@ -1519,8 +1763,19 @@ def main(ctx_factory=cl.create_some_context,
     #current_wv = get_wv(restart_wv)
 
     #fluid_wall = IsothermalWallBoundary(temp_wall)
+
+    # this use to be just symmetry, but has a bunch of extra crap in it now?
     fluid_wall = SymmetryBoundary()
+
+    # original implementation, missing terms for gradients?
     #fluid_wall = AdiabaticSlipBoundary()
+
+    # new implementation, following Mengaldo with modifications for slip vs no slip
+    #fluid_wall = AdiabaticSlipWallBoundary()
+
+    # Tulio's symmetry boundary
+    #fluid_wall = SymmetryBoundary()
+
     wall_farfield = DirichletDiffusionBoundary(temp_wall)
 
     # use dummy boundaries to setup the smoothness state for the target
@@ -1577,15 +1832,23 @@ def main(ctx_factory=cl.create_some_context,
     flow_boundary = PrescribedFluidBoundary(
         boundary_state_func=_target_flow_state_func)
 
+    if periodic:
+        fluid_boundaries = {
+            dd_vol_fluid.trace("fluid_inflow").domain_tag: flow_boundary,
+        }
 
-    fluid_boundaries = {
-        dd_vol_fluid.trace("fluid_inflow").domain_tag: flow_boundary,
-        dd_vol_fluid.trace("fluid_wall").domain_tag: fluid_wall
-    }
+        wall_boundaries = {
+            dd_vol_wall.trace("solid_wall_end").domain_tag: wall_farfield
+        }
+    else:
+        fluid_boundaries = {
+            dd_vol_fluid.trace("fluid_inflow").domain_tag: flow_boundary,
+            dd_vol_fluid.trace("fluid_wall").domain_tag: fluid_wall
+        }
 
-    wall_boundaries = {
-        dd_vol_wall.trace("solid_wall").domain_tag: wall_farfield
-    }
+        wall_boundaries = {
+            dd_vol_wall.trace("solid_wall").domain_tag: wall_farfield
+        }
 
     # compiled wrapper for grad_cv_operator
     def _grad_cv_operator(fluid_state, time):
@@ -1934,16 +2197,35 @@ def main(ctx_factory=cl.create_some_context,
                 t, fluid_state, wall_kappa, wall_temperature)
             fluid_grad_temperature = grad_temperature[0]
             wall_grad_temperature = grad_temperature[1]
+            grad_cv = grad_cv_operator_compiled(fluid_state,
+                                                time=t)
+            from mirgecom.fluid import velocity_gradient
+            grad_v = velocity_gradient(fluid_state.cv, grad_cv)
 
-            viz_ext = [("grad_temperature", fluid_grad_temperature)]
-            """
-            viz_ext = [("rhs", ns_rhs),
-                       ("grad_temperature", fluid_grad_temperature),
+            from mirgecom.inviscid import inviscid_flux
+            inv_flux = inviscid_flux(fluid_state)
+            from mirgecom.viscous import viscous_flux
+            visc_flux = viscous_flux(fluid_state, grad_cv, fluid_grad_temperature)
+
+            viz_ext = [ ("grad_temperature", fluid_grad_temperature),
+                       ("grad_rho", grad_cv.mass),
+                       ("grad_mom_x", grad_cv.momentum[0]),
+                       ("grad_mom_y", grad_cv.momentum[1]),
                        ("grad_v_x", grad_v[0]),
-                       ("grad_v_y", grad_v[1])]
+                       ("grad_v_y", grad_v[1]),
+                       ("grad_e", grad_cv.energy),
+                       ("inv_flux_rho", inv_flux.mass),
+                       ("inv_flux_rhoE", inv_flux.energy),
+                       ("inv_flux_mom_x", inv_flux.momentum[0]),
+                       ("inv_flux_mom_y", inv_flux.momentum[1]),
+                       ("visc_flux_rho", visc_flux.mass),
+                       ("visc_flux_rhoE", visc_flux.energy),
+                       ("visc_flux_mom_x", visc_flux.momentum[0]),
+                       ("visc_flux_mom_y", visc_flux.momentum[1])]
             if dim == 3:
-                viz_ext.extend(("grad_v_z", grad_v[2]))
+                viz_ext.extend(("grad_v_z", grad_cv.velocity[2]))
 
+            """
             viz_ext.extend(("grad_Y_"+species_names[i], grad_y[i])
                            for i in range(nspecies))
             """
