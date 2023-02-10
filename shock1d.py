@@ -1448,6 +1448,40 @@ def main(ctx_factory=cl.create_some_context,
     transfinite = False
     mesh_angle = 0.
 
+    # Filtering is implemented according to HW Sec. 5.3
+    # The modal response function is e^-(alpha * eta ^ 2s), where
+    # - alpha is a user parameter (defaulted like HW's)
+    # - eta := (mode - N_c)/(N - N_c)
+    # - N_c := cutoff mode ( = *filter_frac* x order)
+    # - s := order of the filter (divided by 2)
+    # Modes below N_c are unfiltered. Modes above Nc are weighted
+    # by the modal response function described above.
+    #
+    # Two different filters can be used with the prediction driver.
+    # 1) Solution filtering: filters the solution every *soln_nfilter* steps
+    # 2) RHS filtering: filters the RHS every substep
+    #
+    # Turn on SOLUTION filtering by setting soln_nfilter > 0
+    # Turn on RHS filtering by setting use_rhs_filter = 1.
+    #
+    # --- Filtering settings ---
+    # ------ Solution filtering
+    soln_nfilter = -1  # filter every *nfilter* steps (-1 = no filtering)
+    soln_filter_cutoff = -1  # (-1 = filter_frac*order)
+    soln_filter_frac = .5
+    soln_filter_order = 8
+
+    # Alpha value suggested by:
+    # JSH/TW Nodal DG Methods, Section 5.3
+    # DOI: 10.1007/978-0-387-72067-8
+    soln_filter_alpha = -1.0*np.log(np.finfo(float).eps)
+    # ------ RHS filtering
+    use_rhs_filter = False
+    rhs_filter_cutoff = -1
+    rhs_filter_frac = .5
+    rhs_filter_order = 8
+    rhs_filter_alpha = soln_filter_alpha
+
     # init params
     disc_location = np.zeros(shape=(dim,))
     shock_loc_x = 0.05
@@ -1710,6 +1744,46 @@ def main(ctx_factory=cl.create_some_context,
             mach = float(input_data["mach"])
         except KeyError:
             pass
+        try:
+            soln_nfilter = int(input_data["soln_nfilter"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_frac = float(input_data["soln_filter_frac"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_cutoff = int(input_data["soln_filter_cutoff"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_alpha = float(input_data["soln_filter_alpha"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_order = int(input_data["soln_filter_order"])
+        except KeyError:
+            pass
+        try:
+            use_rhs_filter = bool(input_data["use_rhs_filter"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_frac = float(input_data["rhs_filter_frac"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_cutoff = int(input_data["rhs_filter_cutoff"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_alpha = float(input_data["rhs_filter_alpha"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_order = int(input_data["rhs_filter_order"])
+        except KeyError:
+            pass
 
     disc_location[0] = shock_loc_x
     fuel_location[0] = fuel_loc_x
@@ -1737,6 +1811,51 @@ def main(ctx_factory=cl.create_some_context,
     # cutoff, smoothness below this value is ignored
     beta_sc = 0.01
     gamma_sc = 1.5
+
+    if soln_filter_cutoff < 0:
+        soln_filter_cutoff = int(soln_filter_frac * order)
+    if rhs_filter_cutoff < 0:
+        rhs_filter_cutoff = int(rhs_filter_frac * order)
+
+    from mirgecom.filter import (
+        exponential_mode_response_function as xmrfunc,
+        filter_modally
+    )
+    soln_frfunc = partial(xmrfunc, alpha=soln_filter_alpha,
+                          filter_order=soln_filter_order)
+    rhs_frfunc = partial(xmrfunc, alpha=rhs_filter_alpha,
+                         filter_order=rhs_filter_order)
+
+    def filter_cv(cv):
+        return filter_modally(dcoll, soln_filter_cutoff, soln_frfunc, cv,
+                              dd=dd_vol_fluid)
+
+    def filter_rhs(rhs):
+        return filter_modally(dcoll, rhs_filter_cutoff, rhs_frfunc, rhs,
+                              dd=dd_vol_fluid)
+
+    filter_cv_compiled = actx.compile(filter_cv)
+
+    if rank == 0:
+        if soln_nfilter >= 0:
+            if soln_filter_cutoff >= order:
+                raise ValueError("Invalid setting for solution filter (cutoff >= order).")
+            print("Solution filtering settings:")
+            print(f" - filter every {soln_nfilter} steps")
+            print(f" - filter alpha  = {soln_filter_alpha}")
+            print(f" - filter cutoff = {soln_filter_cutoff}")
+            print(f" - filter order  = {soln_filter_order}")
+        else:
+            print("Solution filtering OFF.")
+        if use_rhs_filter:
+            if rhs_filter_cutoff >= order:
+                raise ValueError("Invalid setting for RHS filter (cutoff >= order).")
+            print("RHS filtering settings:")
+            print(f" - filter alpha  = {rhs_filter_alpha}")
+            print(f" - filter cutoff = {rhs_filter_cutoff}")
+            print(f" - filter order  = {rhs_filter_order}")
+        else:
+            print("RHS filtering OFF.")
 
     if rank == 0:
         if use_av == 0:
@@ -3119,6 +3238,14 @@ def main(ctx_factory=cl.create_some_context,
 
     def my_pre_step(step, t, dt, state):
 
+        # Filter *first* because this will be most straightfwd to
+        # understand and move. For this to work, this routine
+        # must pass back the filtered CV in the state.
+        if check_step(step=step, interval=soln_nfilter):
+            cv, tseed, wv = state
+            cv = filter_cv_compiled(cv)
+            state = make_obj_array([cv, tseed, wv])
+
         cv, tseed, wv = state
         fluid_state = create_fluid_state(cv=cv,
                                          temperature_seed=tseed,
@@ -3487,6 +3614,10 @@ def main(ctx_factory=cl.create_some_context,
                 comm_tag=_FluidOxDiffCommTag)
 
             fluid_rhs = fluid_rhs + 0*fluid_dummy_ox_mass_rhs
+
+        # Use a spectral filter on the RHS
+        if use_rhs_filter:
+            fluid_rhs = filter_rhs(fluid_rhs)
 
         wall_rhs = wall_time_scale * WallVars(
             mass=wall_mass_rhs,
