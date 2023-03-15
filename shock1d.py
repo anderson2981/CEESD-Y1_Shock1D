@@ -45,7 +45,7 @@ from meshmode.mesh import BTAG_ALL, BTAG_NONE  # noqa
 from meshmode.dof_array import DOFArray
 from grudge.shortcuts import make_visualizer
 from grudge.dof_desc import VolumeDomainTag, DOFDesc
-from grudge.op import nodal_max, nodal_min
+import grudge.op as op
 from grudge.dof_desc import DD_VOLUME_ALL
 from grudge.trace_pair import inter_volume_trace_pairs
 from logpyle import IntervalTimer, set_dt
@@ -1383,6 +1383,7 @@ def main(ctx_factory=cl.create_some_context,
 
     # discretization and model control
     order = 2
+    quadrature_order = -1
     alpha_sc = 0.3
     s0_sc = -5.0
     kappa_sc = 0.5
@@ -1447,6 +1448,40 @@ def main(ctx_factory=cl.create_some_context,
     interface_ratio = 2
     transfinite = False
     mesh_angle = 0.
+
+    # Filtering is implemented according to HW Sec. 5.3
+    # The modal response function is e^-(alpha * eta ^ 2s), where
+    # - alpha is a user parameter (defaulted like HW's)
+    # - eta := (mode - N_c)/(N - N_c)
+    # - N_c := cutoff mode ( = *filter_frac* x order)
+    # - s := order of the filter (divided by 2)
+    # Modes below N_c are unfiltered. Modes above Nc are weighted
+    # by the modal response function described above.
+    #
+    # Two different filters can be used with the prediction driver.
+    # 1) Solution filtering: filters the solution every *soln_nfilter* steps
+    # 2) RHS filtering: filters the RHS every substep
+    #
+    # Turn on SOLUTION filtering by setting soln_nfilter > 0
+    # Turn on RHS filtering by setting use_rhs_filter = 1.
+    #
+    # --- Filtering settings ---
+    # ------ Solution filtering
+    soln_nfilter = -1  # filter every *nfilter* steps (-1 = no filtering)
+    soln_filter_cutoff = -1  # (-1 = filter_frac*order)
+    soln_filter_frac = .5
+    soln_filter_order = 8
+
+    # Alpha value suggested by:
+    # JSH/TW Nodal DG Methods, Section 5.3
+    # DOI: 10.1007/978-0-387-72067-8
+    soln_filter_alpha = -1.0*np.log(np.finfo(float).eps)
+    # ------ RHS filtering
+    use_rhs_filter = False
+    rhs_filter_cutoff = -1
+    rhs_filter_frac = .5
+    rhs_filter_order = 8
+    rhs_filter_alpha = soln_filter_alpha
 
     # init params
     disc_location = np.zeros(shape=(dim,))
@@ -1552,6 +1587,10 @@ def main(ctx_factory=cl.create_some_context,
             pass
         try:
             order = int(input_data["order"])
+        except KeyError:
+            pass
+        try:
+            order = int(input_data["quadrature_order"])
         except KeyError:
             pass
         try:
@@ -1710,6 +1749,46 @@ def main(ctx_factory=cl.create_some_context,
             mach = float(input_data["mach"])
         except KeyError:
             pass
+        try:
+            soln_nfilter = int(input_data["soln_nfilter"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_frac = float(input_data["soln_filter_frac"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_cutoff = int(input_data["soln_filter_cutoff"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_alpha = float(input_data["soln_filter_alpha"])
+        except KeyError:
+            pass
+        try:
+            soln_filter_order = int(input_data["soln_filter_order"])
+        except KeyError:
+            pass
+        try:
+            use_rhs_filter = bool(input_data["use_rhs_filter"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_frac = float(input_data["rhs_filter_frac"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_cutoff = int(input_data["rhs_filter_cutoff"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_alpha = float(input_data["rhs_filter_alpha"])
+        except KeyError:
+            pass
+        try:
+            rhs_filter_order = int(input_data["rhs_filter_order"])
+        except KeyError:
+            pass
 
     disc_location[0] = shock_loc_x
     fuel_location[0] = fuel_loc_x
@@ -1729,6 +1808,9 @@ def main(ctx_factory=cl.create_some_context,
         print(f"Shock capturing parameters: alpha {alpha_sc}, "
               f"s0 {s0_sc}, kappa {kappa_sc}")
 
+    if quadrature_order < 0:
+        quadrature_order = 2*order + 1
+
     # use_av=3 specific parameters
     # flow stagnation temperature
     static_temp = 2076.43
@@ -1737,6 +1819,51 @@ def main(ctx_factory=cl.create_some_context,
     # cutoff, smoothness below this value is ignored
     beta_sc = 0.01
     gamma_sc = 1.5
+
+    if soln_filter_cutoff < 0:
+        soln_filter_cutoff = int(soln_filter_frac * order)
+    if rhs_filter_cutoff < 0:
+        rhs_filter_cutoff = int(rhs_filter_frac * order)
+
+    from mirgecom.filter import (
+        exponential_mode_response_function as xmrfunc,
+        filter_modally
+    )
+    soln_frfunc = partial(xmrfunc, alpha=soln_filter_alpha,
+                          filter_order=soln_filter_order)
+    rhs_frfunc = partial(xmrfunc, alpha=rhs_filter_alpha,
+                         filter_order=rhs_filter_order)
+
+    def filter_cv(cv):
+        return filter_modally(dcoll, soln_filter_cutoff, soln_frfunc, cv,
+                              dd=dd_vol_fluid)
+
+    def filter_rhs(rhs):
+        return filter_modally(dcoll, rhs_filter_cutoff, rhs_frfunc, rhs,
+                              dd=dd_vol_fluid)
+
+    filter_cv_compiled = actx.compile(filter_cv)
+
+    if rank == 0:
+        if soln_nfilter >= 0:
+            if soln_filter_cutoff >= order:
+                raise ValueError("Invalid setting for solution filter (cutoff >= order).")
+            print("Solution filtering settings:")
+            print(f" - filter every {soln_nfilter} steps")
+            print(f" - filter alpha  = {soln_filter_alpha}")
+            print(f" - filter cutoff = {soln_filter_cutoff}")
+            print(f" - filter order  = {soln_filter_order}")
+        else:
+            print("Solution filtering OFF.")
+        if use_rhs_filter:
+            if rhs_filter_cutoff >= order:
+                raise ValueError("Invalid setting for RHS filter (cutoff >= order).")
+            print("RHS filtering settings:")
+            print(f" - filter alpha  = {rhs_filter_alpha}")
+            print(f" - filter cutoff = {rhs_filter_cutoff}")
+            print(f" - filter order  = {rhs_filter_order}")
+        else:
+            print("RHS filtering OFF.")
 
     if rank == 0:
         if use_av == 0:
@@ -1760,6 +1887,8 @@ def main(ctx_factory=cl.create_some_context,
             print(f"\tConstant dt mode, current_dt = {current_dt}")
         print(f"\tt_final = {t_final}")
         print(f"\torder = {order}")
+        if use_overintegration:
+            print(f"\tOverintegration ON: quadrature_order = {quadrature_order}")
         print(f"\tdimen = {dim}")
         print(f"\tTime integration {integrator}")
         print("#### Simluation control data: ####\n")
@@ -2136,18 +2265,20 @@ def main(ctx_factory=cl.create_some_context,
     if rank == 0:
         logger.info("Making discretization")
 
-    dcoll = create_discretization_collection(
-        actx,
-        volume_meshes={
-            vol: mesh
-            for vol, (mesh, _) in volume_to_local_mesh_data.items()},
-        order=order)
-
     from grudge.dof_desc import DISCR_TAG_BASE, DISCR_TAG_QUAD
     if use_overintegration:
         quadrature_tag = DISCR_TAG_QUAD
     else:
         quadrature_tag = DISCR_TAG_BASE
+
+    dcoll = \
+        create_discretization_collection(
+            actx,
+            volume_meshes={
+                vol: mesh
+                for vol, (mesh, _) in volume_to_local_mesh_data.items()},
+            order=order, quadrature_order=quadrature_order
+        )
 
     if rank == 0:
         logger.info("Done making discretization")
@@ -2163,6 +2294,36 @@ def main(ctx_factory=cl.create_some_context,
     from grudge.dt_utils import characteristic_lengthscales
     char_length = characteristic_lengthscales(actx, dcoll, dd=dd_vol_fluid)
     char_length_wall = characteristic_lengthscales(actx, dcoll, dd=dd_vol_wall)
+
+    # some utility functions
+    def vol_min_loc(dd_vol, x):
+        return actx.to_numpy(op.nodal_min_loc(dcoll, dd_vol, x,
+                                              initial=np.inf))[()]
+
+    def vol_max_loc(dd_vol, x):
+        return actx.to_numpy(op.nodal_max_loc(dcoll, dd_vol, x,
+                                              initial=-np.inf))[()]
+
+    def vol_min(dd_vol, x):
+        return actx.to_numpy(op.nodal_min(dcoll, dd_vol, x,
+                                          initial=np.inf))[()]
+
+    def vol_max(dd_vol, x):
+        return actx.to_numpy(op.nodal_max(dcoll, dd_vol, x,
+                                          initial=-np.inf))[()]
+
+    def global_range_check(dd_vol, array, min_val, max_val):
+        return global_reduce(
+            check_range_local(
+                dcoll, dd_vol, array, min_val, max_val), op="lor")
+
+    h_min_fluid = vol_min(dd_vol_fluid, char_length)
+    h_max_fluid = vol_max(dd_vol_fluid, char_length)
+    # h_min_wall = vol_min(dd_vol_wall, char_length_wall)
+    # h_max_wall = vol_max(dd_vol_wall, char_length_wall)
+
+    if rank == 0:
+        print(f"{h_min_fluid=},{h_max_fluid=}")
 
     if rank == 0:
         logger.info("Before restart/init")
@@ -2571,6 +2732,8 @@ def main(ctx_factory=cl.create_some_context,
 
     fluid_visualizer = make_visualizer(dcoll, volume_dd=dd_vol_fluid)
     wall_visualizer = make_visualizer(dcoll, volume_dd=dd_vol_wall)
+    # fluid_oi_visualizer = make_visualizer(dcoll, volume_dd=dd_vol_fluid,)
+    # wall_visualizer = make_visualizer(dcoll, volume_dd=dd_vol_wall)
 
     #    initname = initializer.__class__.__name__
     eosname = eos.__class__.__name__
@@ -2585,30 +2748,6 @@ def main(ctx_factory=cl.create_some_context,
                                      eosname=eosname, casename=casename)
     if rank == 0:
         logger.info(init_message)
-
-    # some utility functions
-    def vol_min_loc(dd_vol, x):
-        from grudge.op import nodal_min_loc
-        return actx.to_numpy(nodal_min_loc(dcoll, dd_vol, x,
-                                           initial=np.inf))[()]
-
-    def vol_max_loc(dd_vol, x):
-        from grudge.op import nodal_max_loc
-        return actx.to_numpy(nodal_max_loc(dcoll, dd_vol, x,
-                                           initial=-np.inf))[()]
-
-    def vol_min(dd_vol, x):
-        return actx.to_numpy(nodal_min(dcoll, dd_vol, x,
-                                       initial=np.inf))[()]
-
-    def vol_max(dd_vol, x):
-        return actx.to_numpy(nodal_max(dcoll, dd_vol, x,
-                                       initial=-np.inf))[()]
-
-    def global_range_check(dd_vol, array, min_val, max_val):
-        return global_reduce(
-            check_range_local(
-                dcoll, dd_vol, array, min_val, max_val), op="lor")
 
     def my_write_status(cv, dv, wall_temperature, dt, cfl_fluid, cfl_wall):
         status_msg = (f"-------- dt = {dt:1.3e},"
@@ -2994,20 +3133,18 @@ def main(ctx_factory=cl.create_some_context,
         actx = wall_kappa.array_context
         mydt = dt
         if constant_cfl:
-            from grudge.op import nodal_min
             ts_field = cfl*my_get_wall_timestep(
                 dcoll=dcoll, wv=wv, wall_kappa=wall_kappa,
                 wall_temperature=wall_temperature)
             mydt = actx.to_numpy(
-                nodal_min(
+                op.nodal_min(
                     dcoll, wall_dd, ts_field, initial=np.inf))[()]
         else:
-            from grudge.op import nodal_max
             ts_field = mydt/my_get_wall_timestep(
                 dcoll=dcoll, wv=wv, wall_kappa=wall_kappa,
                 wall_temperature=wall_temperature)
             cfl = actx.to_numpy(
-                nodal_max(
+                op.nodal_max(
                     dcoll, wall_dd, ts_field, initial=0.))[()]
 
         return ts_field, cfl, mydt
@@ -3061,17 +3198,15 @@ def main(ctx_factory=cl.create_some_context,
         """
         mydt = dt
         if constant_cfl:
-            from grudge.op import nodal_min
             ts_field = cfl*my_get_viscous_timestep(
                 dcoll=dcoll, fluid_state=fluid_state)
-            mydt = fluid_state.array_context.to_numpy(nodal_min(
-                    dcoll, fluid_dd, ts_field, initial=np.inf))[()]
+            mydt = fluid_state.array_context.to_numpy(op.nodal_min(
+                dcoll, fluid_dd, ts_field, initial=np.inf))[()]
         else:
-            from grudge.op import nodal_max
             ts_field = mydt/my_get_viscous_timestep(
                 dcoll=dcoll, fluid_state=fluid_state)
-            cfl = fluid_state.array_context.to_numpy(nodal_max(
-                    dcoll, fluid_dd, ts_field, initial=0.))[()]
+            cfl = fluid_state.array_context.to_numpy(op.nodal_max(
+                dcoll, fluid_dd, ts_field, initial=0.))[()]
 
         return ts_field, cfl, mydt
 
@@ -3118,6 +3253,14 @@ def main(ctx_factory=cl.create_some_context,
     limit_species_compiled = actx.compile(limit_species)
 
     def my_pre_step(step, t, dt, state):
+
+        # Filter *first* because this will be most straightfwd to
+        # understand and move. For this to work, this routine
+        # must pass back the filtered CV in the state.
+        if check_step(step=step, interval=soln_nfilter):
+            cv, tseed, wv = state
+            cv = filter_cv_compiled(cv)
+            state = make_obj_array([cv, tseed, wv])
 
         cv, tseed, wv = state
         fluid_state = create_fluid_state(cv=cv,
@@ -3460,7 +3603,9 @@ def main(ctx_factory=cl.create_some_context,
                 dd_vol_wall.trace("wall_farfield").domain_tag:
                     DirichletDiffusionBoundary(0)}
             wall_ox_boundaries.update({
-                tpair.dd.domain_tag: DirichletDiffusionBoundary(tpair.ext)
+                tpair.dd.domain_tag: DirichletDiffusionBoundary(
+                    op.project(dcoll, tpair.dd,
+                               tpair.dd.with_discr_tag(quadrature_tag), tpair.ext))
                 for tpair in ox_tpairs})
 
             wall_ox_mass_rhs = diffusion_operator(
@@ -3478,7 +3623,9 @@ def main(ctx_factory=cl.create_some_context,
                 bdtag: DirichletDiffusionBoundary(0)
                 for bdtag in fluid_boundaries}
             fluid_ox_boundaries.update({
-                tpair.dd.domain_tag: DirichletDiffusionBoundary(tpair.ext)
+                tpair.dd.domain_tag: DirichletDiffusionBoundary(
+                    op.project(dcoll, tpair.dd,
+                               tpair.dd.with_discr_tag(quadrature_tag), tpair.ext))
                 for tpair in reverse_ox_tpairs})
 
             fluid_dummy_ox_mass_rhs = diffusion_operator(
@@ -3487,6 +3634,10 @@ def main(ctx_factory=cl.create_some_context,
                 comm_tag=_FluidOxDiffCommTag)
 
             fluid_rhs = fluid_rhs + 0*fluid_dummy_ox_mass_rhs
+
+        # Use a spectral filter on the RHS
+        if use_rhs_filter:
+            fluid_rhs = filter_rhs(fluid_rhs)
 
         wall_rhs = wall_time_scale * WallVars(
             mass=wall_mass_rhs,
